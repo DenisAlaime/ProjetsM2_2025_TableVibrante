@@ -2,19 +2,33 @@
 #include "AS5600.h"
 #include "CytronMotorDriver.h"
 
-// --- Matériel ---
-AS5600 as5600;
-CytronMD motor1(PWM_DIR, 4, 5);  // Moteur 1 : PWM = Pin 4, DIR = Pin 5
-CytronMD motor2(PWM_DIR, 6, 7);  // Moteur 2 : PWM = Pin 6, DIR = Pin 7
+// --- Définitions des constantes ---
+#define MOTOR1_PWM_PIN        4
+#define MOTOR1_DIR_PIN        5
+#define MOTOR2_PWM_PIN        3
+#define MOTOR2_DIR_PIN        2
+#define AS5600_MOT1_DIR_PIN   11
+#define AS5600_MOT2_DIR_PIN   10
+#define SENSOR1_MODE_PIN      12
+#define SENSOR2_MODE_PIN      9
+#define REF_INTERRUPT_PIN     6
 
-// --- Paramètres régulation ---
-const int PHASE_TARGET_DEG = 90;   // Déphasage cible en degrés
-const float Kp = 0.8;              // Gain proportionnel (à ajuster)
-const int MOTOR_SPEED_MAX = 100;   // Vitesse max (%)
+#define PHASE_TARGET_DEG      90    // Déphasage cible en degrés
+#define KP                    0.8   // Gain proportionnel
+#define MOTOR_SPEED_MAX       100   // Vitesse max (%)
+#define MOTOR_SPEED_MIN       0     // Vitesse min (%)
+#define REF_PERIOD_DEFAULT    20000 // µs, valeur par défaut
+#define PRINT_INTERVAL_MS     200   // Affichage debug
+
+// --- Matériel ---
+AS5600 as5600Mot1;
+AS5600 as5600Mot2;
+CytronMD motor1(PWM_DIR, MOTOR1_PWM_PIN, MOTOR1_DIR_PIN);  // Moteur 1
+CytronMD motor2(PWM_DIR, MOTOR2_PWM_PIN, MOTOR2_DIR_PIN);  // Moteur 2
 
 // --- Variables moteur maître ---
 volatile unsigned long lastRefTime = 0;
-volatile unsigned long refPeriod = 20000; // µs, valeur par défaut pour éviter division par zéro
+volatile unsigned long refPeriod = REF_PERIOD_DEFAULT;
 volatile bool refDetected = false;
 
 // --- Variables moteur esclave ---
@@ -31,7 +45,7 @@ void isrMoteurMaitre();
 void updateRegulation();
 float getPhaseErrorDeg(float refAngle, float slaveAngle);
 float readSlaveAngleDeg();
-void setMotorsSpeed(int speed); // <-- modifié ici
+void setMotorsSpeed(int speed);
 void testInterruption();
 
 void setup() {
@@ -45,30 +59,32 @@ void setup() {
   Wire.begin();
   Wire.setClock(400000UL);
 
-  as5600.begin(4);
-  as5600.setDirection(AS5600_CLOCK_WISE);
-  as5600.setOutputMode(AS5600_OUTMODE_ANALOG_100);
-  pinMode(12, OUTPUT);
-  digitalWrite(12, HIGH);
+  as5600Mot1.begin(AS5600_MOT1_DIR_PIN);
+  as5600Mot1.setDirection(AS5600_CLOCK_WISE);
+  as5600Mot1.setOutputMode(AS5600_OUTMODE_ANALOG_100);
 
-  pinMode(11, OUTPUT);
-  digitalWrite(11, LOW);
+  as5600Mot2.begin(AS5600_MOT2_DIR_PIN);
+  as5600Mot2.setDirection(AS5600_CLOCK_WISE);
+  as5600Mot2.setOutputMode(AS5600_OUTMODE_ANALOG_100);
+
+  pinMode(SENSOR1_MODE_PIN, OUTPUT);
+  digitalWrite(SENSOR1_MODE_PIN, HIGH);
+
+  pinMode(SENSOR2_MODE_PIN, OUTPUT);
+  digitalWrite(SENSOR2_MODE_PIN, HIGH);
 
   delay(10);
 
-  int b = as5600.isConnected();
-  Serial.print("Connect: ");
-  Serial.println(b);
-  delay(1000);
+  setMotorsSpeed(userSpeed);
 
-  setMotorsSpeed(userSpeed); // <-- modifié ici
-
-  // Interruption sur pin 6 pour le signal de référence moteur maître
-  pinMode(6, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(6), isrMoteurMaitre, FALLING);
+  // Interruption sur pin de référence moteur maître
+  pinMode(REF_INTERRUPT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(REF_INTERRUPT_PIN), isrMoteurMaitre, FALLING);
 
   Serial.println("Tapez 'sr' pour démarrer, 'st' pour arrêter, ou un nombre (0-100) pour régler la vitesse (%)");
-  Serial.println("Déphasage cible : 90°");
+  Serial.print("Déphasage cible : ");
+  Serial.print(PHASE_TARGET_DEG);
+  Serial.println("°");
 }
 
 void loop() {
@@ -77,7 +93,7 @@ void loop() {
   // if (motorRunning) {
   //   updateRegulation();
   // }
-  delay(10); // Boucle rapide pour la régulation
+  delay(10);
 }
 
 // --- Gestion des commandes série ---
@@ -87,18 +103,18 @@ void handleSerialCommands() {
     cmd.trim();
     if (cmd == "sr") {
       motorRunning = true;
-      setMotorsSpeed(userSpeed); // <-- modifié ici
+      setMotorsSpeed(userSpeed);
       Serial.println("Moteurs démarrés.");
     } else if (cmd == "st") {
       motorRunning = false;
-      setMotorsSpeed(0); // <-- modifié ici
+      setMotorsSpeed(0);
       Serial.println("Moteurs arrêtés.");
     } else {
       int val = cmd.toInt();
-      if (val >= 0 && val <= 100) {
+      if (val >= MOTOR_SPEED_MIN && val <= MOTOR_SPEED_MAX) {
         userSpeed = val;
         if (motorRunning) {
-          setMotorsSpeed(userSpeed); // <-- modifié ici
+          setMotorsSpeed(userSpeed);
         }
         Serial.print("Vitesse moteurs réglée à ");
         Serial.print(userSpeed);
@@ -119,7 +135,7 @@ void isrMoteurMaitre() {
 // --- Lecture angle moteur esclave (AS5600) ---
 float readSlaveAngleDeg() {
   // Angle en degrés (0-360)
-  return as5600.readAngle();
+  return as5600Mot1.readAngle();
 }
 
 // --- Calcul erreur de phase (en degrés, -180 à +180) ---
@@ -152,15 +168,15 @@ void updateRegulation() {
   float phaseError = getPhaseErrorDeg(refAngle + phaseTarget, slaveAngle);
 
   // Régulation proportionnelle
-  speedCmd = userSpeed + int(Kp * phaseError);
+  speedCmd = userSpeed + int(KP * phaseError);
   if (speedCmd > MOTOR_SPEED_MAX) speedCmd = MOTOR_SPEED_MAX;
-  if (speedCmd < 0) speedCmd = 0;
+  if (speedCmd < MOTOR_SPEED_MIN) speedCmd = MOTOR_SPEED_MIN;
 
   setMotorsSpeed(speedCmd);
 
   // Affichage debug
   static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 200) {
+  if (millis() - lastPrint > PRINT_INTERVAL_MS) {
     Serial.print("RefAngle: "); Serial.print(refAngle, 1);
     Serial.print(" | SlaveAngle: "); Serial.print(slaveAngle, 1);
     Serial.print(" | PhaseErr: "); Serial.print(phaseError, 1);
@@ -180,12 +196,12 @@ void testInterruption() {
   static unsigned long lastPrint = 0;
   if (refDetected) {
     refDetected = false;
-    Serial.print("Interruption détectée à ");
-    Serial.print(micros());
-    Serial.print(" us, période = ");
-    Serial.print(refPeriod);
-    Serial.println(" us");
-    lastPrint = millis();
+    // Serial.print("Interruption détectée à ");
+    // Serial.print(micros());
+    // Serial.print(" us, période = ");
+    // Serial.print(refPeriod);
+    // Serial.println(" us");
+    // lastPrint = millis();
   }
 }
 
