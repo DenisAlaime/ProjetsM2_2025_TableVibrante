@@ -4,7 +4,8 @@
 
 // --- Matériel ---
 AS5600 as5600;
-CytronMD motor(PWM_DIR, 4, 5);  // PWM = Pin 4, DIR = Pin 5
+CytronMD motor1(PWM_DIR, 4, 5);  // Moteur 1 : PWM = Pin 4, DIR = Pin 5
+CytronMD motor2(PWM_DIR, 6, 7);  // Moteur 2 : PWM = Pin 6, DIR = Pin 7
 
 // --- Paramètres régulation ---
 const int PHASE_TARGET_DEG = 90;   // Déphasage cible en degrés
@@ -30,7 +31,7 @@ void isrMoteurMaitre();
 void updateRegulation();
 float getPhaseErrorDeg(float refAngle, float slaveAngle);
 float readSlaveAngleDeg();
-void setMotorSpeed(int speed);
+void setMotorsSpeed(int speed); // <-- modifié ici
 void testInterruption();
 
 void setup() {
@@ -60,7 +61,7 @@ void setup() {
   Serial.println(b);
   delay(1000);
 
-  setMotorSpeed(userSpeed);
+  setMotorsSpeed(userSpeed); // <-- modifié ici
 
   // Interruption sur pin 6 pour le signal de référence moteur maître
   pinMode(6, INPUT_PULLUP);
@@ -86,20 +87,20 @@ void handleSerialCommands() {
     cmd.trim();
     if (cmd == "sr") {
       motorRunning = true;
-      setMotorSpeed(userSpeed);
-      Serial.println("Moteur démarré.");
+      setMotorsSpeed(userSpeed); // <-- modifié ici
+      Serial.println("Moteurs démarrés.");
     } else if (cmd == "st") {
       motorRunning = false;
-      setMotorSpeed(0);
-      Serial.println("Moteur arrêté.");
+      setMotorsSpeed(0); // <-- modifié ici
+      Serial.println("Moteurs arrêtés.");
     } else {
       int val = cmd.toInt();
       if (val >= 0 && val <= 100) {
         userSpeed = val;
         if (motorRunning) {
-          setMotorSpeed(userSpeed);
+          setMotorsSpeed(userSpeed); // <-- modifié ici
         }
-        Serial.print("Vitesse moteur réglée à ");
+        Serial.print("Vitesse moteurs réglée à ");
         Serial.print(userSpeed);
         Serial.println("%");
       }
@@ -155,7 +156,7 @@ void updateRegulation() {
   if (speedCmd > MOTOR_SPEED_MAX) speedCmd = MOTOR_SPEED_MAX;
   if (speedCmd < 0) speedCmd = 0;
 
-  setMotorSpeed(speedCmd);
+  setMotorsSpeed(speedCmd);
 
   // Affichage debug
   static unsigned long lastPrint = 0;
@@ -168,9 +169,10 @@ void updateRegulation() {
   }
 }
 
-// --- Commande du moteur ---
-void setMotorSpeed(int speed) {
-  motor.setSpeed(speed);
+// --- Commande des deux moteurs ---
+void setMotorsSpeed(int speed) {
+  motor1.setSpeed(speed);
+  motor2.setSpeed(speed);
 }
 
 // --- Test interruption ---
