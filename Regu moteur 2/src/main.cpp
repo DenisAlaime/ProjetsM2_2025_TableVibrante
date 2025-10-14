@@ -31,6 +31,7 @@ void updateRegulation();
 float getPhaseErrorDeg(float refAngle, float slaveAngle);
 float readSlaveAngleDeg();
 void setMotorSpeed(int speed);
+void togglePin(uint8_t pin);
 void testInterruption();
 
 void setup() {
@@ -47,8 +48,11 @@ void setup() {
   as5600.begin(4);
   as5600.setDirection(AS5600_CLOCK_WISE);
   as5600.setOutputMode(AS5600_OUTMODE_ANALOG_100);
-  pinMode(12, OUTPUT);
-  digitalWrite(12, HIGH);
+  pinMode(A5, OUTPUT);
+  digitalWrite(A5, LOW);
+
+  // basculer l'état
+  //togglePin(A5);
 
   pinMode(11, OUTPUT);
   digitalWrite(11, LOW);
@@ -73,10 +77,10 @@ void setup() {
 void loop() {
   handleSerialCommands();
   testInterruption();
-  // if (motorRunning) {
-  //   updateRegulation();
-  // }
-  delay(10); // Boucle rapide pour la régulation
+  if (motorRunning) {
+    updateRegulation();
+  }
+  //delay(10); // Boucle rapide pour la régulation
 }
 
 // --- Gestion des commandes série ---
@@ -173,17 +177,27 @@ void setMotorSpeed(int speed) {
   motor.setSpeed(speed);
 }
 
+// --- Basculer l'état d'une pin (HIGH <-> LOW)
+// Remarque : assurez-vous d'avoir fait `pinMode(pin, OUTPUT);` pour une sortie.
+void togglePin(uint8_t pin) {
+  int state = digitalRead(pin);
+  digitalWrite(pin, (state == HIGH) ? LOW : HIGH);
+}
+
 // --- Test interruption ---
 void testInterruption() {
   static unsigned long lastPrint = 0;
   if (refDetected) {
     refDetected = false;
-    Serial.print("Interruption détectée à ");
-    Serial.print(micros());
-    Serial.print(" us, période = ");
-    Serial.print(refPeriod);
-    Serial.println(" us");
-    lastPrint = millis();
+    togglePin(A5);
+
+    // Serial.print("Interruption détectée à ");
+    // Serial.print(micros());
+    // Serial.print(" us, période = ");
+    // Serial.print(refPeriod);
+    // Serial.println(" us");
+    // lastPrint = millis();
+
   }
 }
 
