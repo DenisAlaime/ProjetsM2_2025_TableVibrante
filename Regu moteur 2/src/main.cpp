@@ -15,7 +15,7 @@
 
 #define PHASE_TARGET_DEG      90    // Déphasage cible en degrés
 #define KP                    0.8   // Gain proportionnel
-#define MOTOR_SPEED_MAX       100   // Vitesse max (%)
+#define MOTOR_SPEED_MAX       255   // Vitesse max (%)
 #define MOTOR_SPEED_MIN       0     // Vitesse min (%)
 #define REF_PERIOD_DEFAULT    20000 // µs, valeur par défaut
 #define PRINT_INTERVAL_MS     200   // Affichage debug
@@ -60,11 +60,11 @@ void setup() {
   Wire.setClock(400000UL);
 
   as5600Mot1.begin(AS5600_MOT1_DIR_PIN);
-  as5600Mot1.setDirection(AS5600_CLOCK_WISE);
+  as5600Mot1.setDirection(AS5600_COUNTERCLOCK_WISE);
   as5600Mot1.setOutputMode(AS5600_OUTMODE_ANALOG_100);
 
   as5600Mot2.begin(AS5600_MOT2_DIR_PIN);
-  as5600Mot2.setDirection(AS5600_CLOCK_WISE);
+  as5600Mot2.setDirection(AS5600_COUNTERCLOCK_WISE);
   as5600Mot2.setOutputMode(AS5600_OUTMODE_ANALOG_100);
 
   pinMode(SENSOR1_MODE_PIN, OUTPUT);
@@ -90,10 +90,10 @@ void setup() {
 void loop() {
   handleSerialCommands();
   testInterruption();
-  // if (motorRunning) {
-  //   updateRegulation();
-  // }
-  delay(10);
+  if (motorRunning) {
+     updateRegulation();
+   }
+  //delay(10);
 }
 
 // --- Gestion des commandes série ---
@@ -175,14 +175,14 @@ void updateRegulation() {
   setMotorsSpeed(speedCmd);
 
   // Affichage debug
-  static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > PRINT_INTERVAL_MS) {
-    Serial.print("RefAngle: "); Serial.print(refAngle, 1);
-    Serial.print(" | SlaveAngle: "); Serial.print(slaveAngle, 1);
-    Serial.print(" | PhaseErr: "); Serial.print(phaseError, 1);
-    Serial.print(" | Cmd: "); Serial.println(speedCmd);
-    lastPrint = millis();
-  }
+  // static unsigned long lastPrint = 0;
+  // if (millis() - lastPrint > PRINT_INTERVAL_MS) {
+  //   Serial.print("RefAngle: "); Serial.print(refAngle, 1);
+  //   Serial.print(" | SlaveAngle: "); Serial.print(slaveAngle, 1);
+  //   Serial.print(" | PhaseErr: "); Serial.print(phaseError, 1);
+  //   Serial.print(" | Cmd: "); Serial.println(speedCmd);
+  //   lastPrint = millis();
+  // }
 }
 
 // --- Commande des deux moteurs ---
