@@ -1,88 +1,111 @@
 #include <Arduino.h>
+#include <QuickPID.h>
 #include "AS5600.h"
 #include "CytronMotorDriver.h"
 #include "avdweb_AnalogReadFast.h"
 
 // --- Définitions des constantes ---
-#define MOTOR1_PWM_PIN 3
-#define MOTOR1_DIR_PIN 2
-#define MOTOR2_PWM_PIN 4
-#define MOTOR2_DIR_PIN 5
-#define AS5600_MOT1_DIR_PIN 11
-#define AS5600_MOT2_DIR_PIN 10
-#define SENSOR1_MODE_PIN 12
-#define SENSOR2_MODE_PIN 9
-#define REF_INTERRUPT_PIN 6
-// Broche de sortie pour générer un créneau à chaque passage à zéro
-#define REF_PULSE_PIN 7
-// Durée du créneau en microsecondes
-#define REF_PULSE_WIDTH_US 25
+#define MOTOR1_PIN_A 3
+#define MOTOR1_PIN_B 2
 
-#define PHASE_TARGET_DEG 0 // Déphasage cible en degrés
-// Gains du régulateur (modifiable à l'exécution)
-float Kp = 0.8;                  // proportionnel
-float Kd = 0.0;                  // dérivé
-#define MOTOR_SPEED_MAX 255      // Vitesse max (%)
+#define AS5600_MOT1_DIR_PIN 10
+#define SENSOR1_MODE_PIN 9
+#define SENSOR1_OUT_POS_PIN A5
+
+#define MOTOR2_PIN_A 4
+#define MOTOR2_PIN_B 5
+
+#define AS5600_MOT2_DIR_PIN 11
+#define SENSOR2_MODE_PIN 12
+#define SENSOR2_OUT_POS_PIN A4
+
+#define REF_INTERRUPT_PIN 6
+
+
+#define MOTOR_SPEED_MAX 180      // Vitesse max (%)
 #define MOTOR_SPEED_MIN 0        // Vitesse min (%)
+
+#define RECORD_N_SAMPLES 1000  // Nombre d'échantillons à enregistrer pour l'analyse
+#define RECORD_COLUMNS 4       // Nombre de colonnes à enregistrer (ex : temps, consigne, mesure)
+
 #define RECORD_SMOOTHING 5     // Lissage des enregistrements
 
-// --- Matériel ---
+#dekfine PID_COMPUTE_PERIOD_US 1000  // Période de calcul des PID en microsecondes
+
+// --- Initialisations des objets ---
+CytronMD motor1(PWM_PWM, MOTOR1_PIN_A, MOTOR1_PIN_B);
+CytronMD motor2(PWM_PWM, MOTOR2_PIN_A, MOTOR2_PIN_B);
+
+// capteurs AS5600
 AS5600 as5600Mot1;
 AS5600 as5600Mot2;
 float sensor1Scaling = 0.8425;//échelle sur la lecture du capteur. 1.0 signifie 1024 == 360.0°.(pas correct, à calibrer)
 float sensor2Scaling = 0.8425;//échelle sur la lecture du capteur. 1.0 signifie 1024 == 360.0°.(pas correct, à calibrer)
+
+
 // création du buffer pour l'enregistrement des données
 float dataBuffer[RECORD_N_SAMPLES][RECORD_COLUMNS];
 int recordIndex = 0;
 //nom des colonnes
 const char* columnNames[RECORD_COLUMNS] = {"Time [ms]", "motor1Output", "Sensor1", "Error1"};
 
-// --- Variables moteur esclave ---
-unsigned long lastAngleTime = 0;
-float lastAngle = 0;
+// création des variables pour les capteurs et les PID
+float sensor1 = 0.0;
+float sensor2 = 0.0;
+float motor1Output = 0.0;
+float motor2Output = 0.0;
+
+float error1 = 0.0;
+float error2 = 0.0;
+
+//les setpoints sont 0 tout le temps, car on utilise l'erreur entre la position mesurée et la position de référence
+// cela permet de gérer le wrap-around facilement.
+float setPoint1 = 0.0;
+float setPoint2 = 0.0; 
+
+// décalage de phase pour le moteur 2
+float motor2PhaseOffset = 0.0; 
+
+QuickPID pid1(&error1, &motor1Output, &setPoint1, 0.5, 0.1, 0.05, QuickPID::Action::reverse);
+QuickPID pid2(&error2, &motor2Output, &setPoint2, 0.5, 0.1, 0.05, QuickPID::Action::reverse);
 
 // --- Commandes utilisateur ---
-int userSpeed = 50;
+float userSpeed = 50.0; // vitesse cible par défaut [Hz]
+// période de rotation des moteurs, exprimée en microsecondes
+unsigned long period = 20000; // période initiale (50 Hz)
 bool motorRunning = true;
 // Inversion par défaut pour chaque moteur. motor1 était précédemment inversé dans le code.
-bool motor1Inverted = true;
-bool motor2Inverted = false;
+bool motor1Inverted = false;
+bool motor2Inverted = true;
 bool debugMotors = false;
-// Affiche le KPI (Kp) initial au démarrage si besoin
+bool changed = true;
 
-// --- Prototypes ---
+unsigned long lastTime = 0;
+
+
 void handleSerialCommands();
-void isrMoteurMaitre();
-void updateRegulation();
-float getPhaseErrorDeg(float refAngle, float slaveAngle);
-float readSlaveAngleDeg();
-void setMotorsSpeed(int speed);
-void testInterruption();
+float genReferenceAngle(unsigned long timeMicros);
 
 void setup()
 {
-  Serial.begin(115200);
-  Serial.println();
-  Serial.println(__FILE__);
-  Serial.print("AS5600_LIB_VERSION: ");
-  Serial.println(AS5600_LIB_VERSION);
-  Serial.println();
+    Serial.begin(115200);
+    Serial.println();
+    
+    Wire.begin();
+    Wire.setClock(400000UL);
 
-  Wire.begin();
-  Wire.setClock(400000UL);
+    as5600Mot1.begin(AS5600_MOT1_DIR_PIN);
+    as5600Mot1.setDirection(AS5600_COUNTERCLOCK_WISE);
+    as5600Mot1.setOutputMode(AS5600_OUTMODE_ANALOG_100);
+    pinMode(SENSOR1_MODE_PIN, OUTPUT);
+    digitalWrite(SENSOR1_MODE_PIN, HIGH); // mode position
 
-  as5600Mot1.begin(AS5600_MOT1_DIR_PIN);
-  as5600Mot1.setDirection(AS5600_CLOCK_WISE);
-  as5600Mot1.setOutputMode(AS5600_OUTMODE_ANALOG_100);
+    as5600Mot2.begin(AS5600_MOT2_DIR_PIN);
+    as5600Mot2.setDirection(AS5600_COUNTERCLOCK_WISE);
+    as5600Mot2.setOutputMode(AS5600_OUTMODE_ANALOG_100);
+    pinMode(SENSOR2_MODE_PIN, OUTPUT);
+    digitalWrite(SENSOR2_MODE_PIN, HIGH); // mode position
 
-  as5600Mot2.begin(AS5600_MOT2_DIR_PIN);
-  as5600Mot2.setDirection(AS5600_COUNTERCLOCK_WISE);
-  as5600Mot2.setOutputMode(AS5600_OUTMODE_ANALOG_100);
-
-  pinMode(SENSOR1_MODE_PIN, OUTPUT);
-  digitalWrite(SENSOR1_MODE_PIN, HIGH);
-
-  pinMode(SENSOR2_MODE_PIN, OUTPUT);
     // init de l'entrée analogique rapide    
     analogReadResolution(10);
     pinMode(SENSOR1_OUT_POS_PIN, INPUT);
@@ -90,22 +113,36 @@ void setup()
     analogRead(SENSOR1_OUT_POS_PIN);
     analogRead(SENSOR2_OUT_POS_PIN);
 
-  // Broche de sortie pour le créneau de référence
-  pinMode(REF_PULSE_PIN, OUTPUT);
+    // configuration des PID
+    pid1.SetOutputLimits(0, MOTOR_SPEED_MAX);
+    pid2.SetOutputLimits(0, MOTOR_SPEED_MAX);
 
-  digitalWrite(REF_PULSE_PIN, LOW);
+    pid1.SetMode(QuickPID::Control::timer);
+    pid2.SetMode(QuickPID::Control::timer);
 
-  //   pinMode(REF_INTERRUPT_PIN, INP);
-  // REF_INTERRUPT_PIN
-
-  Serial.println("Tapez 'sr' pour démarrer, 'st' pour arrêter, ou un nombre (0-100) pour régler la vitesse (%)");
-  Serial.print("Déphasage cible : ");
-  Serial.print(PHASE_TARGET_DEG);
-  Serial.println("°");
+    //library expects fast calls and will sample time itself.
+    pid1.SetSampleTimeUs(PID_COMPUTE_PERIOD_US);
+    pid2.SetSampleTimeUs(PID_COMPUTE_PERIOD_US);
+    delay(1000);
+    Serial.println(pid1.Compute());
+    Serial.println(pid2.Compute());
+    lastTime = micros();
 }
 
 void loop()
 {
+    // temps
+    unsigned long currentTime = micros();
+    if (currentTime - lastTime < PID_COMPUTE_PERIOD_US) {
+        return; // attendre la fin de la période
+    }
+    lastTime = currentTime;
+
+
+    // lecture des capteurs
+    // sensor1 = as5600Mot1.readAngle();
+    // sensor2 = as5600Mot2.readAngle();
+
     //lecture pin analogique, boucle de lecture et moyenne
     for(int i=0; i<RECORD_SMOOTHING; i++){
         // valeur 1023 -> 360 degrés.
@@ -118,7 +155,33 @@ void loop()
     //ajout des offsets
     sensor1 *= sensor1Scaling;
     sensor2 *= sensor2Scaling;
-  handleSerialCommands();
+
+    
+
+    // gestion des commandes série
+    handleSerialCommands();
+
+    // calcul de l'erreur
+    float refAngle = genReferenceAngle(currentTime);
+    error1 = refAngle - sensor1;
+    error2 = refAngle + motor2PhaseOffset - sensor2;
+
+
+    
+
+    // ramener l'erreur dans la plage -180 à 180°
+    while (error1 > 180.0) error1 -= 360.0;
+    while (error1 < -180.0) error1 += 360.0;
+
+    while (error2 > 180.0) error2 -= 360.0;
+    while (error2 < -180.0) error2 += 360.0;
+
+    
+
+    // calcul des sorties PID
+    pid1.Compute();
+    pid2.Compute();
+
 
     // enregistrement des données
     dataBuffer[recordIndex][0] = (float)currentTime;
@@ -129,8 +192,34 @@ void loop()
     if (recordIndex >= RECORD_N_SAMPLES) {
         recordIndex = 0; // reset index when buffer is full
     }
-  }
-  // delay(10);
+
+
+    // vérification du mode PID pour mise à jour des moteurs
+    if (pid1.GetMode() > 0){// automatic
+        changed = true;
+    }
+
+    // commande des moteurs
+    if (changed){
+        if (motorRunning) {
+            if (motor1Inverted) {
+                motor1.setSpeed((int)(-motor1Output));
+            } else {
+                motor1.setSpeed((int)motor1Output);
+            }
+            if (motor2Inverted) {
+                motor2.setSpeed((int)(-motor2Output));
+            } else {
+                motor2.setSpeed((int)motor2Output);
+            }
+        } else {
+            motor1.setSpeed(0);
+            motor2.setSpeed(0);
+        }
+        changed = false;
+    }
+    //pause pour stabilité
+    // delay(10);
 }
 
 // --- Gestion des commandes série ---
@@ -157,8 +246,14 @@ void handleSerialCommands()
         if (cmd == "sr")
         {
           motorRunning = true;
-          setMotorsSpeed(userSpeed);
           Serial.println("Moteurs démarrés.");
+          changed = true;
+        }
+        else if (cmd == "st")
+        {
+          motorRunning = false;
+          Serial.println("Moteurs arrêtés.");
+          changed = true;
         }
         else if (cmd == "dbg")
         {
@@ -171,12 +266,30 @@ void handleSerialCommands()
           motor1Inverted = !motor1Inverted;
           Serial.print("Inversion moteur 1 : ");
           Serial.println(motor1Inverted ? "ON" : "OFF");
+          changed = true;
         }
         else if (cmd == "inv2")
         {
           motor2Inverted = !motor2Inverted;
           Serial.print("Inversion moteur 2 : ");
           Serial.println(motor2Inverted ? "ON" : "OFF");
+          changed = true;
+        }
+        else if (cmd == "a")
+        {
+          // toggle PID auto/manual
+            if (pid1.GetMode() == 1)// automatic
+            {
+                pid1.SetMode(QuickPID::Control::manual);
+                pid2.SetMode(QuickPID::Control::manual);
+                Serial.println("Mode PID : MANUAL");
+            }
+            else
+            {
+                pid1.SetMode(QuickPID::Control::automatic);
+                pid2.SetMode(QuickPID::Control::automatic);
+                Serial.println("Mode PID : AUTOMATIC");
+            }
         }
         else if (cmd.length() > 0 && (cmd.charAt(0) == 'k' || cmd.charAt(0) == 'K'))
         {
@@ -188,9 +301,10 @@ void handleSerialCommands()
             float v = num.toFloat();
             if (v > 0)
             {
-              Kp = v;
+              pid1.SetTunings(v, pid1.GetKi(), pid1.GetKd());
+              pid2.SetTunings(v, pid2.GetKi(), pid2.GetKd());
               Serial.print("Kp réglé à ");
-              Serial.println(Kp, 4);
+              Serial.println(pid1.GetKp(), 4);
             }
             else
             {
@@ -209,13 +323,79 @@ void handleSerialCommands()
             // Kd peut être 0 ou positif
             if (v >= 0)
             {
-              Kd = v;
+                pid1.SetTunings(pid1.GetKp(), pid1.GetKi(), v);
+                pid2.SetTunings(pid2.GetKp(), pid2.GetKi(), v);
               Serial.print("Kd réglé à ");
-              Serial.println(Kd, 6);
+              Serial.println(pid1.GetKd(), 6);
             }
             else
             {
               Serial.println("Erreur: valeur Kd invalide");
+            }
+          }
+        }
+        else if (cmd.length() > 0 && (cmd.charAt(0) == 'i' || cmd.charAt(0) == 'I'))
+        {
+          // commande i<val> pour changer le Ki du régulateur
+          String num = cmd.substring(1);
+          num.trim();
+          if (num.length() > 0)
+          {
+            float v = num.toFloat();
+            // Ki peut être 0 ou positif
+            if (v >= 0)
+            {
+                pid1.SetTunings(pid1.GetKp(), v, pid1.GetKd());
+                pid2.SetTunings(pid2.GetKp(), v, pid2.GetKd());
+              Serial.print("Ki réglé à ");
+              Serial.println(pid1.GetKi(), 6);
+            }
+            else
+            {
+              Serial.println("Erreur: valeur Ki invalide");
+            }
+          }
+        }
+        else if (cmd.length() > 0 && (cmd.charAt(0) == 's' || cmd.charAt(0) == 'S'))
+        {
+          // commande s<val> pour changer la référence de vitesse du régulateur
+          String num = cmd.substring(1);
+          num.trim();
+          if (num.length() > 0)
+          {
+            float v = num.toFloat();
+            // Ki peut être 0 ou positif
+            if (v >= 3.0)
+            {
+              userSpeed = v;
+              period = (unsigned long)(1000000.0 / userSpeed);
+              Serial.print("Vitesse de référence [Hz] réglée à ");
+              Serial.println(userSpeed, 6);
+            }
+            else
+            {
+              Serial.println("Erreur: valeur de vitesse de référence invalide");
+            }
+          }
+        }
+        else if (cmd.length() > 0 && (cmd.charAt(0) == 'o' || cmd.charAt(0) == 'O'))
+        {
+          // commande o<val> pour changer le déphasage du moteur 2 (moteur 1 a toujours 0°)
+          String num = cmd.substring(1);
+          num.trim();
+          if (num.length() > 0)
+          {
+            float v = num.toFloat();
+            // déphasage entre 0 et 360°
+            if (v >= 0.0 && v < 360.0)
+            {
+              motor2PhaseOffset = v;
+              Serial.print("Déphasage moteur 2 réglé à ");
+              Serial.println(v, 2);
+            }
+            else
+            {
+              Serial.println("Erreur: valeur de déphasage invalide");
             }
           }
         }
@@ -248,15 +428,15 @@ void handleSerialCommands()
           // Autoriser une vitesse négative pour inverser le sens de rotation
           if (val >= -MOTOR_SPEED_MAX && val <= MOTOR_SPEED_MAX)
           {
-            userSpeed = val;
-            if (motorRunning)
-            {
-              setMotorsSpeed(userSpeed);
-            }
+            motor1Output = val>0 ? val : -val;
+            if (val < 0) motor1Inverted = !motor1Inverted;
+            motor2Output = val>0 ? val : -val;  
+            if (val < 0) motor2Inverted = !motor2Inverted;
             Serial.print("Vitesse moteurs réglée à ");
-            Serial.print(userSpeed);
+            Serial.print(motor1Output);
             Serial.println("%");
           }
+          changed = true;
         }
       }
       else
@@ -289,115 +469,11 @@ void handleSerialCommands()
   }
 }
 
-// --- Interruption passage à zéro moteur maître ---
-void isrMoteurMaitre()
-{
-  unsigned long now = micros();
-  refPeriod = now - lastRefTime;
-  lastRefTime = now;
-  refDetected = true;
-}
 
-// --- Lecture angle moteur esclave (AS5600) ---
-float readSlaveAngleDeg()
-{
-  // Angle en degrés (0-360)
-  return as5600Mot2.readAngle();
-}
-
-// --- Calcul erreur de phase (en degrés, -180 à +180) ---
-float getPhaseErrorDeg(float refAngle, float slaveAngle)
-{
-  float error = refAngle - slaveAngle;
-  while (error > 180)
-    error -= 360;
-  while (error < -180)
-    error += 360;
-  return error;
-}
-
-// --- Régulation de vitesse et de phase ---
-void updateRegulation()
-{
-  static float phaseTarget = PHASE_TARGET_DEG;
-  static float lastPhaseError = 0;
-  static int speedCmd = 0;
-
-  // On suppose que le moteur maître fait un tour à chaque interruption
-  static float refAngle = 0;
-  if (refDetected)
-  {
-    refDetected = false;
-    refAngle = 0; // Réinitialise l'angle de référence à chaque tour
-    // digitalWrite(REF_PULSE_PIN, !digitalRead(REF_PULSE_PIN)); // Activer le pulse
-  }
-  else
-  {
-    // Avance l'angle de référence en fonction du temps écoulé depuis le dernier passage à zéro
-    unsigned long elapsed = micros() - lastRefTime;
-    refAngle = (elapsed / (float)refPeriod) * 360.0;
-    if (refAngle > 360)
-      refAngle = 360;
-  }
-
-  float slaveAngle = readSlaveAngleDeg();
-  float phaseError = getPhaseErrorDeg(refAngle + phaseTarget, slaveAngle);
-
-  // Régulation PD (proportionnel + dérivé)
-  float pTerm = Kp * phaseError;
-  float dTerm = Kd * (phaseError - lastPhaseError);
-  speedCmd = userSpeed + int(pTerm + dTerm);
-  if (speedCmd > MOTOR_SPEED_MAX)
-    speedCmd = MOTOR_SPEED_MAX;
-  if (speedCmd < MOTOR_SPEED_MIN)
-    speedCmd = MOTOR_SPEED_MIN;
-
-  // mettre à jour lastPhaseError pour le terme dérivé
-  lastPhaseError = phaseError;
-
-  setMotorsSpeed(speedCmd);
-
-  // Affichage debug
-  // static unsigned long lastPrint = 0;
-  // if (millis() - lastPrint > PRINT_INTERVAL_MS) {
-  //   Serial.print("RefAngle: "); Serial.print(refAngle, 1);
-  //   Serial.print(" | SlaveAngle: "); Serial.print(slaveAngle, 1);
-  //   Serial.print(" | PhaseErr: "); Serial.print(phaseError, 1);
-  //   Serial.print(" | Cmd: "); Serial.println(speedCmd);
-  //   lastPrint = millis();
-  // }
-}
-
-// --- Commande des deux moteurs ---
-void setMotorsSpeed(int speed)
-{
-  int s1 = speed < 0 ? -speed : speed;
-  int s2 = motor2Inverted ? -speed : speed;
-  motor1.setSpeed(s1);
-  motor2.setSpeed(s2);
-
-  if (debugMotors)
-  {
-    Serial.print("setMotorsSpeed: consigne=");
-    Serial.print(speed);
-    Serial.print(" | motor1Inverted=");
-    Serial.print(motor1Inverted);
-    Serial.print(" -> s1=");
-    Serial.print(s1);
-    Serial.print(" | motor2Inverted=");
-    Serial.print(motor2Inverted);
-    Serial.print(" -> s2=");
-    Serial.println(s2);
-  }
-}
-
-// --- Test interruption ---
-void testInterruption()
-{
-  static unsigned long lastPrint = 0;
-  if (refDetected == true)
-  {
-    digitalWrite(REF_PULSE_PIN, !digitalRead(REF_PULSE_PIN)); // Activer le pulse
-    refDetected = false;
-  }
+float genReferenceAngle(unsigned long timeMicros){
+    // Génère la référence d'angle utilisée pour sychroniser les moteurs en phase. 
+    // La référence d'angle est calculée en fonction du temps écoulé.
+    unsigned long mod = timeMicros % period;
+    float angle = (mod * 360.0 / period);
+    return angle;
 }
