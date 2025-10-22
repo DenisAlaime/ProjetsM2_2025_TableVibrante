@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "AS5600.h"
 #include "CytronMotorDriver.h"
+#include "avdweb_AnalogReadFast.h"
 
 // --- Définitions des constantes ---
 #define MOTOR1_PWM_PIN 3
@@ -23,12 +24,13 @@ float Kp = 0.8;                  // proportionnel
 float Kd = 0.0;                  // dérivé
 #define MOTOR_SPEED_MAX 255      // Vitesse max (%)
 #define MOTOR_SPEED_MIN 0        // Vitesse min (%)
-#define REF_PERIOD_DEFAULT 20000 // µs, valeur par défaut
-#define PRINT_INTERVAL_MS 200    // Affichage debug
+#define RECORD_SMOOTHING 5     // Lissage des enregistrements
 
 // --- Matériel ---
 AS5600 as5600Mot1;
 AS5600 as5600Mot2;
+float sensor1Scaling = 0.8425;//échelle sur la lecture du capteur. 1.0 signifie 1024 == 360.0°.(pas correct, à calibrer)
+float sensor2Scaling = 0.8425;//échelle sur la lecture du capteur. 1.0 signifie 1024 == 360.0°.(pas correct, à calibrer)
 // création du buffer pour l'enregistrement des données
 float dataBuffer[RECORD_N_SAMPLES][RECORD_COLUMNS];
 int recordIndex = 0;
@@ -81,15 +83,12 @@ void setup()
   digitalWrite(SENSOR1_MODE_PIN, HIGH);
 
   pinMode(SENSOR2_MODE_PIN, OUTPUT);
-  digitalWrite(SENSOR2_MODE_PIN, HIGH);
-
-  delay(10);
-
-  // setMotorsSpeed(userSpeed);
-
-  // Interruption sur pin de référence moteur maître
-  pinMode(REF_INTERRUPT_PIN, INPUT);
-  // attachInterrupt(digitalPinToInterrupt(REF_INTERRUPT_PIN), isrMoteurMaitre, FALLING);
+    // init de l'entrée analogique rapide    
+    analogReadResolution(10);
+    pinMode(SENSOR1_OUT_POS_PIN, INPUT);
+    pinMode(SENSOR2_OUT_POS_PIN, INPUT);
+    analogRead(SENSOR1_OUT_POS_PIN);
+    analogRead(SENSOR2_OUT_POS_PIN);
 
   // Broche de sortie pour le créneau de référence
   pinMode(REF_PULSE_PIN, OUTPUT);
@@ -107,6 +106,18 @@ void setup()
 
 void loop()
 {
+    //lecture pin analogique, boucle de lecture et moyenne
+    for(int i=0; i<RECORD_SMOOTHING; i++){
+        // valeur 1023 -> 360 degrés.
+        //we convert the 10 bit value in a float degrees value
+        sensor1 += (float)analogReadFast(SENSOR1_OUT_POS_PIN)* 360.0 / 1023.0;
+        sensor2 += (float)analogReadFast(SENSOR2_OUT_POS_PIN)* 360.0 / 1023.0;
+    }
+    sensor1 /= RECORD_SMOOTHING;
+    sensor2 /= RECORD_SMOOTHING;
+    //ajout des offsets
+    sensor1 *= sensor1Scaling;
+    sensor2 *= sensor2Scaling;
   handleSerialCommands();
 
     // enregistrement des données
