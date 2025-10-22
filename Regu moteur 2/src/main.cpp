@@ -29,18 +29,11 @@ float Kd = 0.0;                  // dérivé
 // --- Matériel ---
 AS5600 as5600Mot1;
 AS5600 as5600Mot2;
-CytronMD motor1(PWM_PWM, MOTOR1_PWM_PIN, MOTOR1_DIR_PIN); // Moteur 1 toujours positif
-CytronMD motor2(PWM_PWM, MOTOR2_PWM_PIN, MOTOR2_DIR_PIN); // Moteur 2
-
-// --- Variables moteur maître ---
-volatile unsigned long lastRefTime = 0;
-volatile unsigned long refPeriod = REF_PERIOD_DEFAULT;
-volatile bool refDetected = false;
-// Flags pour gérer la génération du créneau sans appeler digitalWrite() dans l'ISR
-volatile bool pulseRequest = false;
-volatile unsigned long pulseRequestTime = 0;
-volatile bool pulseActive = false;
-volatile unsigned long pulseEndTime = 0;
+// création du buffer pour l'enregistrement des données
+float dataBuffer[RECORD_N_SAMPLES][RECORD_COLUMNS];
+int recordIndex = 0;
+//nom des colonnes
+const char* columnNames[RECORD_COLUMNS] = {"Time [ms]", "motor1Output", "Sensor1", "Error1"};
 
 // --- Variables moteur esclave ---
 unsigned long lastAngleTime = 0;
@@ -116,18 +109,15 @@ void loop()
 {
   handleSerialCommands();
 
-  if (digitalRead(REF_INTERRUPT_PIN) == 0)
-  {
-    digitalWrite(REF_PULSE_PIN, LOW); // Activer le pulse
-  }
-  else
-
-    digitalWrite(REF_PULSE_PIN, HIGH); // Activer le pulse
-
-  // testInterruption();
-  if (motorRunning)
-  {
-    updateRegulation();
+    // enregistrement des données
+    dataBuffer[recordIndex][0] = (float)currentTime;
+    dataBuffer[recordIndex][1] = motor1Output;
+    dataBuffer[recordIndex][2] = sensor1;
+    dataBuffer[recordIndex][3] = error1;
+    recordIndex++;
+    if (recordIndex >= RECORD_N_SAMPLES) {
+        recordIndex = 0; // reset index when buffer is full
+    }
   }
   // delay(10);
 }
@@ -218,11 +208,28 @@ void handleSerialCommands()
             }
           }
         }
-        else if (cmd == "st")
-        {
-          motorRunning = false;
-          setMotorsSpeed(0);
-          Serial.println("Moteurs arrêtés.");
+        else if (cmd == "gr")
+        {//plot the buffered content : One line with "GRAPH", then header line, then data lines, then "END"
+          Serial.println("GRAPH");
+          // print header
+          for (int col = 0; col < RECORD_COLUMNS; col++) {
+              Serial.print(columnNames[col]);
+              if (col < RECORD_COLUMNS - 1) Serial.print(",");
+          }
+          Serial.println();
+          // print data
+          int i = recordIndex;
+          while (i+1 != recordIndex)
+          {
+            for (int col = 0; col < RECORD_COLUMNS; col++) {
+                Serial.print(dataBuffer[i][col]);
+                if (col < RECORD_COLUMNS - 1) Serial.print(",");
+            }
+            Serial.println();
+            i++;
+            if (i >= RECORD_N_SAMPLES) i = 0;
+        }
+          Serial.println("END");
         }
         else
         {
